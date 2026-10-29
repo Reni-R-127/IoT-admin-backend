@@ -9,14 +9,18 @@ import adminRoutes from "./routes/admin.js";
 const app = express();
 const port = Number(process.env.PORT || 5001);
 
+// Trust the reverse proxy used by Render.
+// This is required for express-rate-limit to handle forwarded IP headers.
+app.set("trust proxy", 1);
+
+app.disable("x-powered-by");
+
 const allowedOrigins = (
   process.env.CLIENT_ORIGINS || "http://localhost:5174"
 )
   .split(",")
   .map((origin) => origin.trim())
   .filter(Boolean);
-
-app.disable("x-powered-by");
 
 app.use(helmet());
 
@@ -34,6 +38,7 @@ app.use(
 
 app.use(express.json({ limit: "1mb" }));
 
+// API rate limiting
 app.use(
   "/api",
   rateLimit({
@@ -44,6 +49,7 @@ app.use(
   })
 );
 
+// Health check
 app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
@@ -55,9 +61,10 @@ app.get("/api/health", (_req, res) => {
   });
 });
 
-// Register admin routes only once.
+// Admin routes
 app.use("/api/admin", adminRoutes);
 
+// Central error handler
 app.use((err, _req, res, _next) => {
   console.error("Admin API error:", err);
 
@@ -72,8 +79,9 @@ app.use((err, _req, res, _next) => {
   });
 });
 
+// Environment validation
 if (!process.env.MONGODB_URI) {
-  console.error("MONGODB_URI is missing in admin-backend/.env");
+  console.error("MONGODB_URI is missing in admin-backend environment variables.");
   process.exit(1);
 }
 
@@ -82,11 +90,12 @@ if (
   process.env.ADMIN_API_KEY.length < 32
 ) {
   console.error(
-    "ADMIN_API_KEY must be at least 32 characters in admin-backend/.env"
+    "ADMIN_API_KEY must be at least 32 characters in admin-backend environment variables."
   );
   process.exit(1);
 }
 
+// Connect to MongoDB and start server
 try {
   await mongoose.connect(process.env.MONGODB_URI, {
     serverSelectionTimeoutMS: 10000,
@@ -94,8 +103,8 @@ try {
 
   console.log("MongoDB connected successfully.");
 
-  app.listen(port, () => {
-    console.log(`Admin API running at http://localhost:${port}`);
+  app.listen(port, "0.0.0.0", () => {
+    console.log(`Admin API listening on port ${port}`);
   });
 } catch (error) {
   console.error("Failed to start admin backend:", error.message);
