@@ -17,6 +17,266 @@ const r = Router();
 // Protect all admin routes.
 r.use(requireAdmin);
 
+/**
+ * File: admin-backend/src/routes/admin.js
+ * Purpose: Provides API routes for student testimonials.
+ * Dependencies: Review model from ../models/Content.js
+ * Data Source: MongoDB Review collection.
+ * Security: Protected by the existing requireAdmin middleware.
+ * Related Files: Admin Student Testimonials page and public website.
+ */
+
+// ==================== STUDENT TESTIMONIALS ====================
+
+r.get("/testimonials", async (_q, s, next) => {
+  try {
+    const items = await Review.find()
+      .sort({ createdAt: -1 })
+      .lean();
+
+    return s.json(items);
+  } catch (error) {
+    next(error);
+  }
+});
+
+r.post("/testimonials", async (q, s, next) => {
+  try {
+    const {
+      name,
+      role,
+      rating,
+      message,
+      approved,
+    } = q.body ?? {};
+
+    if (
+      typeof name !== "string" ||
+      !name.trim() ||
+      typeof role !== "string" ||
+      !role.trim() ||
+      typeof message !== "string" ||
+      !message.trim()
+    ) {
+      return s.status(400).json({
+        message: "Name, role, and testimonial message are required.",
+      });
+    }
+
+    const numericRating = Number(rating);
+
+    if (
+      !Number.isInteger(numericRating) ||
+      numericRating < 1 ||
+      numericRating > 5
+    ) {
+      return s.status(400).json({
+        message: "Rating must be between 1 and 5.",
+      });
+    }
+
+    const item = await Review.create({
+      name: name.trim(),
+      role: role.trim(),
+      rating: numericRating,
+      message: message.trim(),
+      approved: approved === true,
+    });
+
+    return s.status(201).json(item);
+  } catch (error) {
+    if (error.name === "ValidationError") {
+      return s.status(400).json({
+        message: error.message,
+      });
+    }
+
+    next(error);
+  }
+});
+
+r.put("/testimonials/:id", async (q, s, next) => {
+  try {
+    const {
+      name,
+      role,
+      rating,
+      message,
+      approved,
+    } = q.body ?? {};
+
+    if (
+      typeof name !== "string" ||
+      !name.trim() ||
+      typeof role !== "string" ||
+      !role.trim() ||
+      typeof message !== "string" ||
+      !message.trim()
+    ) {
+      return s.status(400).json({
+        message: "Name, role, and testimonial message are required.",
+      });
+    }
+
+    const numericRating = Number(rating);
+
+    if (
+      !Number.isInteger(numericRating) ||
+      numericRating < 1 ||
+      numericRating > 5
+    ) {
+      return s.status(400).json({
+        message: "Rating must be between 1 and 5.",
+      });
+    }
+
+    const item = await Review.findByIdAndUpdate(
+      q.params.id,
+      {
+        name: name.trim(),
+        role: role.trim(),
+        rating: numericRating,
+        message: message.trim(),
+        approved: approved === true,
+      },
+      {
+        new: true,
+        runValidators: true,
+      }
+    );
+
+    if (!item) {
+      return s.status(404).json({
+        message: "Testimonial not found.",
+      });
+    }
+
+    return s.json(item);
+  } catch (error) {
+    if (
+      error.name === "ValidationError" ||
+      error.name === "CastError"
+    ) {
+      return s.status(400).json({
+        message: error.message,
+      });
+    }
+
+    next(error);
+  }
+});
+
+r.patch("/testimonials/:id", async (q, s, next) => {
+  try {
+    if (typeof q.body?.approved !== "boolean") {
+      return s.status(400).json({
+        message: "A valid publication status is required.",
+      });
+    }
+
+    const item = await Review.findByIdAndUpdate(
+      q.params.id,
+      { approved: q.body.approved },
+      {
+        new: true,
+        runValidators: true,
+      }
+    );
+
+    if (!item) {
+      return s.status(404).json({
+        message: "Testimonial not found.",
+      });
+    }
+
+    return s.json(item);
+  } catch (error) {
+    if (error.name === "CastError") {
+      return s.status(400).json({
+        message: "Invalid testimonial ID.",
+      });
+    }
+
+    next(error);
+  }
+});
+
+r.delete("/testimonials/:id", async (q, s, next) => {
+  try {
+    const item = await Review.findByIdAndDelete(q.params.id);
+
+    if (!item) {
+      return s.status(404).json({
+        message: "Testimonial not found.",
+      });
+    }
+
+    return s.status(204).end();
+  } catch (error) {
+    if (error.name === "CastError") {
+      return s.status(400).json({
+        message: "Invalid testimonial ID.",
+      });
+    }
+
+    next(error);
+  }
+});
+
+/**
+ * File: admin-backend/src/routes/admin.js
+ * Purpose: Creates student reviews using the existing Review model.
+ * Dependencies: Review from ../models/Content.js
+ * Data Source: Validated request body.
+ * Security: Requires the existing admin router authentication middleware.
+ * Related Files: admin-frontend/src/pages/ReviewsPage.jsx
+ */
+
+r.post("/reviews", async (q, s, next) => {
+  try {
+    const { name, role, rating, message, approved } = q.body ?? {};
+
+    if (
+      typeof name !== "string" ||
+      !name.trim() ||
+      typeof role !== "string" ||
+      typeof message !== "string" ||
+      !message.trim()
+    ) {
+      return s.status(400).json({
+        message: "Name, role, and review message are required.",
+      });
+    }
+
+    const numericRating = Number(rating);
+
+    if (
+      !Number.isInteger(numericRating) ||
+      numericRating < 1 ||
+      numericRating > 5
+    ) {
+      return s.status(400).json({
+        message: "Rating must be between 1 and 5.",
+      });
+    }
+
+    const review = await Review.create({
+      name: name.trim(),
+      role: role.trim() || "Parent",
+      rating: numericRating,
+      message: message.trim(),
+      approved: approved === true,
+    });
+
+    return s.status(201).json({
+      message: "Review created successfully.",
+      review,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // ==================== OVERVIEW ====================
 
 r.get("/overview", async (_q, s, next) => {
