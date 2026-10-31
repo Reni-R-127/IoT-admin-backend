@@ -5,8 +5,10 @@
  * Admin APIs for website content and staff management.
  *
  * Features:
- * - Staff authentication
- * - Staff management
+ * - Super Admin login
+ * - Staff login
+ * - Super Admin password management
+ * - Staff password management
  * - Product CRUD
  * - Course CRUD
  * - Blog CRUD
@@ -19,7 +21,7 @@
  * - Media uploads
  *
  * Authentication:
- * Super Admin: ADMIN_API_KEY
+ * Super Admin: JWT Bearer token
  * Staff: JWT Bearer token + module permissions
  *
  * Database: MongoDB / Mongoose
@@ -40,6 +42,8 @@ import {
   Enquiry,
   Notification,
   Staff,
+  SuperAdmin,
+  STAFF_PERMISSIONS,
 } from "../models/Content.js";
 
 import {
@@ -55,28 +59,6 @@ const r = Router();
 // ======================================================
 // CONSTANTS
 // ======================================================
-
-const STAFF_ROLES = [
-  "editor",
-  "content_manager",
-  "support",
-  "admin",
-];
-
-const STAFF_PERMISSIONS = [
-  "overview",
-  "courses",
-  "products",
-  "blogs",
-  "pricing",
-  "projects",
-  "media",
-  "enquiries",
-  "notifications",
-  "reviews",
-  "staff",
-  "settings",
-];
 
 const PRODUCT_TONES = [
   "blue",
@@ -117,6 +99,40 @@ function isValidEmail(value) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 }
 
+function normalizeStaffRole(value) {
+  if (typeof value !== "string") return null;
+
+  const role = value.trim().replace(/\s+/g, " ");
+
+  if (
+    role.length < 2 ||
+    role.length > 60 ||
+    /[\u0000-\u001f\u007f]/.test(role)
+  ) {
+    return null;
+  }
+
+  return role;
+}
+
+function normalizeStaffPermissions(value) {
+  if (!Array.isArray(value)) return null;
+
+  const permissions = [...new Set(value)];
+
+  if (
+    !permissions.every(
+      (permission) =>
+        typeof permission === "string" &&
+        STAFF_PERMISSIONS.includes(permission)
+    )
+  ) {
+    return null;
+  }
+
+  return permissions;
+}
+
 function handleValidationError(error, res) {
   if (error?.code === 11000) {
     res.status(409).json({
@@ -152,7 +168,6 @@ function normalizeProductBody(body = {}) {
     }
   }
 
-  // Support imageUrl as an alternative field.
   if (
     payload.image === undefined &&
     typeof body.imageUrl === "string"
@@ -251,10 +266,98 @@ function validateProductBody(payload) {
   return null;
 }
 
+// ======================================================
+// SUPER ADMIN LOGIN
+// POST /api/admin/auth/login
+// Login using EMAIL + PASSWORD
+// ======================================================
+
+r.post(
+  "/auth/login",
+  asyncRoute(async (req, res) => {
+    const email = String(req.body?.email || "")
+      .trim()
+      .toLowerCase();
+
+    const password = String(req.body?.password || "");
+
+    if (!email || !password) {
+      return res.status(400).json({
+        message: "Email and password are required.",
+      });
+    }
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({
+        message: "Enter a valid email address.",
+      });
+    }
+
+    const admin = await SuperAdmin.findOne({
+      email,
+    }).select("+passwordHash");
+
+    if (!admin || !admin.active || !admin.passwordHash) {
+      return res.status(401).json({
+        message: "Invalid email or password.",
+      });
+    }
+
+    const passwordMatches = await bcrypt.compare(
+      password,
+      admin.passwordHash
+    );
+
+    if (!passwordMatches) {
+      return res.status(401).json({
+        message: "Invalid email or password.",
+      });
+    }
+
+    const secret = process.env.ADMIN_JWT_SECRET;
+
+    if (!secret || Buffer.byteLength(secret) < 32) {
+      return res.status(503).json({
+        message: "Admin authentication is not configured.",
+      });
+    }
+
+    const token = jwt.sign(
+      {
+        sub: admin._id.toString(),
+        accountType: "superadmin",
+        tokenVersion: Number(admin.tokenVersion || 0),
+      },
+      secret,
+      {
+        expiresIn: "8h",
+        algorithm: "HS256",
+      }
+    );
+
+    admin.lastLoginAt = new Date();
+    await admin.save();
+
+    return res.json({
+      message: "Login successful.",
+      token,
+      tokenType: "Bearer",
+      expiresIn: 28800,
+      mustChangePassword: Boolean(admin.mustChangePassword),
+
+      admin: {
+        id: admin._id.toString(),
+        email: admin.email,
+      },
+    });
+  })
+);
+
 
 // ======================================================
-// STAFF LOGIN
-// Public endpoint - before authentication middleware.
+// 2. STAFF LOGIN
+// Public route - MUST be before authentication middleware.
+//
 // POST /api/admin/staff/login
 // ======================================================
 
@@ -304,6 +407,7 @@ r.post(
     const token = jwt.sign(
       {
         sub: staff._id.toString(),
+        accountType: "staff",
         tokenVersion: Number(staff.tokenVersion || 0),
       },
       secret,
@@ -314,13 +418,14 @@ r.post(
     );
 
     return res.json({
+      message: "Staff login successful.",
       token,
       tokenType: "Bearer",
       expiresIn: 28800,
       mustChangePassword: Boolean(staff.mustChangePassword),
 
       staff: {
-        id: staff._id,
+        id: staff._id.toString(),
         name: staff.name,
         email: staff.email,
         role: staff.role,
@@ -332,26 +437,163 @@ r.post(
 
 
 // ======================================================
-// ADMIN / STAFF AUTHENTICATION
-// All remaining routes require authentication.
+// 3. AUTHENTICATION MIDDLEWARE
+//
+// All routes below this point require authentication.
+//
+// IMPORTANT:
+// Password change route MUST be below this middleware.
 // ======================================================
 
 r.use(requireAdminOrStaff);
 
 
 // ======================================================
-// STAFF PASSWORD CHANGE
+// 4. SUPER ADMIN PASSWORD CHANGE
+//
+// POST /api/admin/settings/super-admin-password
+//
+// Used for:
+// - Initial temporary password replacement
+// - Future Super Admin password changes
+// ======================================================
+
+r.post(
+  "/settings/super-admin-password",
+  requireSuperAdmin,
+  asyncRoute(async (req, res) => {
+    const currentPassword = String(
+      req.body?.currentPassword || ""
+    );
+
+    const newPassword = String(
+      req.body?.newPassword || ""
+    );
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({
+        message: "Current and new passwords are required.",
+      });
+    }
+
+    if (newPassword.length < 14) {
+      return res.status(400).json({
+        message: "Password must contain at least 14 characters.",
+      });
+    }
+
+    if (
+      !/[A-Z]/.test(newPassword) ||
+      !/[a-z]/.test(newPassword) ||
+      !/[0-9]/.test(newPassword) ||
+      !/[!@#$%^&*(),.?":{}|<>_\-]/.test(newPassword)
+    ) {
+      return res.status(400).json({
+        message:
+          "Password must include uppercase, lowercase, number and special character.",
+      });
+    }
+
+    if (
+      !req.auth?.id ||
+      req.auth.type !== "superadmin"
+    ) {
+      return res.status(401).json({
+        message: "Super Admin login required.",
+      });
+    }
+
+    const admin = await SuperAdmin.findById(req.auth.id)
+      .select("+passwordHash");
+
+    if (!admin || !admin.active) {
+      return res.status(401).json({
+        message: "Super Admin account is unavailable.",
+      });
+    }
+
+    const matches = await bcrypt.compare(
+      currentPassword,
+      admin.passwordHash
+    );
+
+    if (!matches) {
+      return res.status(401).json({
+        message: "Current password is incorrect.",
+      });
+    }
+
+    if (currentPassword === newPassword) {
+      return res.status(400).json({
+        message:
+          "New password must be different from current password.",
+      });
+    }
+
+    admin.passwordHash = await bcrypt.hash(
+      newPassword,
+      12
+    );
+
+    admin.mustChangePassword = false;
+    admin.lastPasswordChangedAt = new Date();
+
+    // Revoke previous Super Admin JWT sessions.
+    admin.tokenVersion =
+      Number(admin.tokenVersion || 0) + 1;
+
+    await admin.save();
+
+    return res.json({
+      message:
+        "Password updated successfully. Please log in again.",
+      mustLoginAgain: true,
+      sessionRevoked: true,
+    });
+  })
+);
+
+
+// ======================================================
+// 5. STAFF PASSWORD CHANGE
 // POST /api/admin/staff/change-password
+//
+// Supports first-time temporary-password replacement and
+// later password changes. Current password is always verified.
 // ======================================================
 
 r.post(
   "/staff/change-password",
   asyncRoute(async (req, res) => {
-    const password = String(req.body?.password || "");
+    const currentPassword = String(
+      req.body?.currentPassword || ""
+    );
 
-    if (password.length < 12) {
+    const newPassword = String(
+      req.body?.newPassword || ""
+    );
+
+    if (!currentPassword || !newPassword) {
       return res.status(400).json({
-        message: "Password must contain at least 12 characters.",
+        message: "Current and new passwords are required.",
+      });
+    }
+
+    if (newPassword.length < 14) {
+      return res.status(400).json({
+        message: "Password must contain at least 14 characters.",
+      });
+    }
+
+    if (
+      !/[A-Z]/.test(newPassword) ||
+      !/[a-z]/.test(newPassword) ||
+      !/[0-9]/.test(newPassword) ||
+      !/[!@#$%^&*(),.?":{}|<>_\-]/.test(newPassword)
+    ) {
+      return res.status(400).json({
+        message:
+          "Password must include uppercase, lowercase, number and special character.",
       });
     }
 
@@ -370,35 +612,41 @@ r.post(
       });
     }
 
-    const samePassword = await bcrypt.compare(
-      password,
+    const currentMatches = await bcrypt.compare(
+      currentPassword,
       staff.passwordHash
     );
 
-    if (samePassword) {
-      return res.status(400).json({
-        message: "New password must be different from the temporary password.",
+    if (!currentMatches) {
+      return res.status(401).json({
+        message: "Current password is incorrect.",
       });
     }
 
-    staff.passwordHash = await bcrypt.hash(password, 12);
-    staff.mustChangePassword = false;
+    if (currentPassword === newPassword) {
+      return res.status(400).json({
+        message: "New password must be different from current password.",
+      });
+    }
 
-    // Invalidate the old login token.
+    staff.passwordHash = await bcrypt.hash(newPassword, 12);
+    staff.mustChangePassword = false;
     staff.tokenVersion = Number(staff.tokenVersion || 0) + 1;
 
     await staff.save();
 
     return res.json({
-      message: "Password changed successfully. Please log in again.",
+      message: "Password changed successfully. Please sign in again.",
       mustLoginAgain: true,
+      sessionRevoked: true,
     });
   })
 );
 
 
 // ======================================================
-// MEDIA UPLOAD
+// 6. MEDIA UPLOAD
+//
 // POST /api/admin/media/upload
 // ======================================================
 
@@ -425,8 +673,7 @@ r.post(
 
 
 // ======================================================
-// STUDENT TESTIMONIALS
-// Supports old and new frontend field names.
+// 7. STUDENT TESTIMONIALS
 // ======================================================
 
 r.get(
@@ -636,7 +883,7 @@ r.delete(
 
 
 // ======================================================
-// OVERVIEW
+// 8. OVERVIEW
 // GET /api/admin/overview
 // ======================================================
 
@@ -700,7 +947,7 @@ r.get(
 
 
 // ======================================================
-// COURSES
+// 9. COURSES
 // ======================================================
 
 r.get(
@@ -765,12 +1012,8 @@ r.delete(
 
 
 // ======================================================
-// PRODUCTS / IOT KITS
-// Staff must have the products permission.
+// 10. PRODUCTS / IOT KITS
 // ======================================================
-
-// GET /api/admin/products
-// Returns active and inactive products for Admin.
 
 r.get(
   "/products",
@@ -786,9 +1029,6 @@ r.get(
   })
 );
 
-
-// POST /api/admin/products
-// Create a product.
 
 r.post(
   "/products",
@@ -822,9 +1062,6 @@ r.post(
   })
 );
 
-
-// PUT /api/admin/products/:id
-// Update product details.
 
 r.put(
   "/products/:id",
@@ -900,9 +1137,6 @@ r.put(
 );
 
 
-// PATCH /api/admin/products/:id/status
-// Activate or deactivate product.
-
 r.patch(
   "/products/:id/status",
   asyncRoute(async (req, res) => {
@@ -939,9 +1173,6 @@ r.patch(
 );
 
 
-// DELETE /api/admin/products/:id
-// Permanently delete a product.
-
 r.delete(
   "/products/:id",
   asyncRoute(async (req, res) => {
@@ -964,7 +1195,7 @@ r.delete(
 
 
 // ======================================================
-// BLOGS
+// 11. BLOGS
 // ======================================================
 
 r.get(
@@ -1043,7 +1274,7 @@ r.delete(
 
 
 // ======================================================
-// PRICING PLANS
+// 12. PRICING PLANS
 // ======================================================
 
 r.get(
@@ -1113,7 +1344,7 @@ r.delete(
 
 
 // ======================================================
-// PROJECT LAB
+// 13. PROJECT LAB
 // ======================================================
 
 r.get(
@@ -1180,7 +1411,7 @@ r.delete(
 
 
 // ======================================================
-// ENQUIRIES
+// 14. ENQUIRIES
 // ======================================================
 
 r.get(
@@ -1255,9 +1486,10 @@ r.patch(
 
 
 // ======================================================
-// NOTIFICATIONS
-// Keep /read-all before /:id.
+// 15. NOTIFICATIONS
 // ======================================================
+
+// Keep /read-all before /:id.
 
 r.get(
   "/notifications",
@@ -1367,7 +1599,7 @@ r.delete(
 
 
 // ======================================================
-// REVIEWS
+// 16. REVIEWS
 // ======================================================
 
 r.get(
@@ -1406,7 +1638,8 @@ r.post(
       numericRating > 5
     ) {
       return res.status(400).json({
-        message: "Name, role, valid rating and review message are required.",
+        message:
+          "Name, role, valid rating and review message are required.",
       });
     }
 
@@ -1480,10 +1713,14 @@ r.delete(
 
 
 // ======================================================
-// STAFF MANAGEMENT
+// 17. STAFF MANAGEMENT
 // SUPER ADMIN ONLY
+//
+// Role is free text. Authorization is controlled exclusively
+// by the allowed permissions array, not by the role label.
 // ======================================================
 
+// GET /api/admin/staff
 r.get(
   "/staff",
   requireSuperAdmin,
@@ -1493,60 +1730,60 @@ r.get(
       .sort({ createdAt: -1 })
       .lean();
 
-    return res.json(staff);
+    return res.json({
+      items: staff,
+      total: staff.length,
+    });
   })
 );
 
 
+// POST /api/admin/staff
+// Creates a staff account and returns its temporary password once.
 r.post(
   "/staff",
   requireSuperAdmin,
   asyncRoute(async (req, res) => {
     const name = String(req.body?.name || "").trim();
-
     const email = String(req.body?.email || "")
       .trim()
       .toLowerCase();
 
-    const role = String(req.body?.role || "editor").trim();
-
-    const permissions = req.body?.permissions;
+    const role = normalizeStaffRole(req.body?.role || "Staff");
+    const permissions = normalizeStaffPermissions(
+      req.body?.permissions ?? []
+    );
 
     const active =
       typeof req.body?.active === "boolean"
         ? req.body.active
         : true;
 
-    if (!name || !email || !Array.isArray(permissions)) {
+    if (!name || name.length > 100) {
       return res.status(400).json({
-        message: "Name, email and permissions are required.",
+        message: "Staff name is required and must be 100 characters or fewer.",
       });
     }
 
     if (!isValidEmail(email)) {
       return res.status(400).json({
-        message: "Enter a valid email address.",
+        message: "Enter a valid staff email address.",
       });
     }
 
-    if (!STAFF_ROLES.includes(role)) {
+    if (!role) {
       return res.status(400).json({
-        message: "Invalid staff role.",
+        message: "Enter a role between 2 and 60 characters.",
       });
     }
 
-    if (
-      !permissions.every((permission) =>
-        STAFF_PERMISSIONS.includes(permission)
-      )
-    ) {
+    if (!permissions) {
       return res.status(400).json({
-        message: "Invalid module permission.",
+        message: "One or more selected permissions are invalid.",
       });
     }
 
-    const existing = await Staff.findOne({ email })
-      .select("_id");
+    const existing = await Staff.findOne({ email }).select("_id");
 
     if (existing) {
       return res.status(409).json({
@@ -1558,73 +1795,119 @@ r.post(
       .randomBytes(18)
       .toString("base64url");
 
-    const passwordHash = await bcrypt.hash(
-      temporaryPassword,
-      12
-    );
+    const passwordHash = await bcrypt.hash(temporaryPassword, 12);
 
     const staff = await Staff.create({
       name,
       email,
       passwordHash,
       role,
-      permissions: [...new Set(permissions)],
+      permissions,
       active,
       mustChangePassword: true,
       tokenVersion: 0,
     });
 
     return res.status(201).json({
-      message: "Staff member created successfully.",
-
+      message: "Staff account created. Copy the temporary password now; it will not be shown again.",
       staff: {
-        id: staff._id,
+        id: staff._id.toString(),
         name: staff.name,
         email: staff.email,
         role: staff.role,
         permissions: staff.permissions,
         active: staff.active,
+        mustChangePassword: staff.mustChangePassword,
       },
-
-      // Show this temporary password once to Super Admin.
       temporaryPassword,
     });
   })
 );
 
 
+// PATCH /api/admin/staff/:id/permissions
+// "View Permissions" editor saves only page permissions.
+// Every save increments tokenVersion and forces the staff member
+// to sign in again so removed access cannot remain in an old session.
+r.patch(
+  "/staff/:id/permissions",
+  requireSuperAdmin,
+  asyncRoute(async (req, res) => {
+    const permissions = normalizeStaffPermissions(
+      req.body?.permissions
+    );
+
+    if (!permissions) {
+      return res.status(400).json({
+        message: "One or more selected permissions are invalid.",
+      });
+    }
+
+    const staff = await Staff.findByIdAndUpdate(
+      req.params.id,
+      {
+        $set: {
+          permissions,
+        },
+        $inc: {
+          tokenVersion: 1,
+        },
+      },
+      {
+        new: true,
+        runValidators: true,
+      }
+    ).select("-passwordHash -tokenVersion");
+
+    if (!staff) {
+      return res.status(404).json({
+        message: "Staff member not found.",
+      });
+    }
+
+    return res.json({
+      message: "Staff permissions updated. The staff member must sign in again.",
+      staff,
+    });
+  })
+);
+
+
+// PUT /api/admin/staff/:id
+// Updates profile, custom role and active state.
 r.put(
   "/staff/:id",
   requireSuperAdmin,
   asyncRoute(async (req, res) => {
-    const name =
-      typeof req.body?.name === "string"
-        ? req.body.name.trim()
-        : "";
+    const name = String(req.body?.name || "").trim();
+    const email = String(req.body?.email || "")
+      .trim()
+      .toLowerCase();
 
-    const email =
-      typeof req.body?.email === "string"
-        ? req.body.email.trim().toLowerCase()
-        : "";
+    const role = normalizeStaffRole(req.body?.role);
+    const active = req.body?.active;
 
-    const {
-      role,
-      permissions,
-      active,
-    } = req.body || {};
-
-    if (
-      !name ||
-      !isValidEmail(email) ||
-      !STAFF_ROLES.includes(role) ||
-      !Array.isArray(permissions) ||
-      !permissions.every((permission) =>
-        STAFF_PERMISSIONS.includes(permission)
-      ) ||
-      typeof active !== "boolean"
-    ) {
+    if (!name || name.length > 100) {
       return res.status(400).json({
-        message: "Invalid staff update details.",
+        message: "Staff name is required and must be 100 characters or fewer.",
+      });
+    }
+
+    if (!isValidEmail(email)) {
+      return res.status(400).json({
+        message: "Enter a valid staff email address.",
+      });
+    }
+
+    if (!role) {
+      return res.status(400).json({
+        message: "Enter a role between 2 and 60 characters.",
+      });
+    }
+
+    if (typeof active !== "boolean") {
+      return res.status(400).json({
+        message: "Account active status must be true or false.",
       });
     }
 
@@ -1639,25 +1922,19 @@ r.put(
       });
     }
 
-    const update = {
-      $set: {
-        name,
-        email,
-        role,
-        permissions: [...new Set(permissions)],
-        active,
-      },
-    };
-
-    if (active === false) {
-      update.$inc = {
-        tokenVersion: 1,
-      };
-    }
-
     const staff = await Staff.findByIdAndUpdate(
       req.params.id,
-      update,
+      {
+        $set: {
+          name,
+          email,
+          role,
+          active,
+        },
+        $inc: {
+          tokenVersion: 1,
+        },
+      },
       {
         new: true,
         runValidators: true,
@@ -1671,13 +1948,15 @@ r.put(
     }
 
     return res.json({
-      message: "Staff member updated successfully.",
+      message: "Staff member updated. The staff member must sign in again.",
       staff,
     });
   })
 );
 
 
+// DELETE /api/admin/staff/:id
+// Soft-deletes by deactivating and revoking all sessions.
 r.delete(
   "/staff/:id",
   requireSuperAdmin,

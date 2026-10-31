@@ -14,6 +14,65 @@
 
 import mongoose from "mongoose";
 
+// ======================================================
+// SUPER ADMIN MODEL
+// ======================================================
+
+const superAdminSchema = new mongoose.Schema(
+  {
+    email: {
+      type: String,
+      required: true,
+      unique: true,
+      lowercase: true,
+      trim: true,
+      maxlength: 254,
+    },
+
+    passwordHash: {
+      type: String,
+      required: true,
+      select: false,
+    },
+
+    active: {
+      type: Boolean,
+      default: true,
+    },
+
+    mustChangePassword: {
+      type: Boolean,
+      default: true,
+    },
+
+    tokenVersion: {
+      type: Number,
+      default: 0,
+    },
+
+    lastPasswordChangedAt: {
+      type: Date,
+      default: null,
+    },
+
+    lastLoginAt: {
+      type: Date,
+      default: null,
+    },
+  },
+  {
+    timestamps: true,
+  }
+);
+
+
+// ======================================================
+// SUPER ADMIN MODEL EXPORT
+// ======================================================
+
+export const SuperAdmin =
+  mongoose.models.SuperAdmin ||
+  mongoose.model("SuperAdmin", superAdminSchema);
 
 // ======================================================
 // COURSE MODEL
@@ -499,34 +558,21 @@ const notificationSchema = new mongoose.Schema(
 
 
 // ======================================================
-// STAFF ROLES
-// ======================================================
-
-export const STAFF_ROLES = [
-  "editor",
-  "content_manager",
-  "support",
-  "admin",
-];
-
-
-// ======================================================
-// STAFF PERMISSIONS
+// STAFF MODULE PERMISSIONS
+// Staff cannot receive Super Admin-only modules.
+// Role names are free text and are not used for authorization.
 // ======================================================
 
 export const STAFF_PERMISSIONS = [
   "overview",
   "courses",
-  "products",
   "blogs",
   "pricing",
   "projects",
-  "media",
   "enquiries",
   "notifications",
   "reviews",
-  "staff",
-  "settings",
+  "testimonials",
 ];
 
 
@@ -558,10 +604,15 @@ const staffSchema = new mongoose.Schema(
       select: false,
     },
 
+    // Custom display role entered by Super Admin.
+    // Authorization is based only on permissions, never role text.
     role: {
       type: String,
-      enum: STAFF_ROLES,
-      default: "editor",
+      required: true,
+      trim: true,
+      minlength: 2,
+      maxlength: 60,
+      default: "Staff",
     },
 
     permissions: {
