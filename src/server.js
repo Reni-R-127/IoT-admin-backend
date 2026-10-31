@@ -5,6 +5,7 @@ import helmet from "helmet";
 import mongoose from "mongoose";
 import rateLimit from "express-rate-limit";
 import adminRoutes from "./routes/admin.js";
+import path from "path";
 
 const app = express();
 const port = Number(process.env.PORT || 5001);
@@ -22,7 +23,13 @@ const allowedOrigins = (
   .map((origin) => origin.trim())
   .filter(Boolean);
 
-app.use(helmet());
+app.use(
+  helmet({
+    crossOriginResourcePolicy: {
+      policy: "cross-origin",
+    },
+  })
+);
 
 app.use(
   cors({
@@ -60,18 +67,31 @@ app.get("/api/health", (_req, res) => {
         : "disconnected",
   });
 });
-
+app.use("/uploads", express.static(path.resolve("uploads")));
 // Admin routes
 app.use("/api/admin", adminRoutes);
 
 // Central error handler
 app.use((err, _req, res, _next) => {
-  console.error("Admin API error:", err);
+  console.error("Admin API error:", err.message);
 
   if (err.message === "Origin not allowed by CORS") {
-    return res.status(403).json({
-      message: "Origin not allowed.",
+    return res.status(403).json({ message: "Origin not allowed." });
+  }
+
+  if (err instanceof Error && err.name === "MulterError") {
+    const status = err.code === "LIMIT_FILE_SIZE" ? 413 : 400;
+
+    return res.status(status).json({
+      message:
+        err.code === "LIMIT_FILE_SIZE"
+          ? "Image must be 3 MB or smaller."
+          : err.message,
     });
+  }
+
+  if (err.message === "Upload a JPG, PNG, or WebP image.") {
+    return res.status(400).json({ message: err.message });
   }
 
   return res.status(500).json({
